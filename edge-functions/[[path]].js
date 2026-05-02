@@ -2,7 +2,7 @@ export default async function onRequest(context) {
   const { request } = context;
   const url = new URL(request.url);
 
-  // 【关键修复 1】：拦截并直接响应 OPTIONS 预检请求 (解决 TV 端本地代理的严格跨域)
+  // 1. 处理 TV 端播放器特有的 OPTIONS 跨域预检
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -15,57 +15,86 @@ export default async function onRequest(context) {
     });
   }
 
+  // 2. 核心：构造【绝对纯净】的请求头，彻底屏蔽 OK影视/TVBox 的 okhttp 特征
+  const fakeHeaders = new Headers();
+  fakeHeaders.set("Referer", "https://688zb24.com");
+  fakeHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+
+  // =====================================================================
+  // 路由 A：专门处理 M3U8 内部的 TS 切片代理 (防 CDN 漂移)
+  // =====================================================================
+  if (url.pathname === "/ts_proxy") {
+    const actualTsUrl = url.searchParams.get("url");
+    if (!actualTsUrl) return new Response("Missing TS URL", { status: 400 });
+
+    try {
+      // 代理请求真实的 TS 切片
+      const tsResponse = await fetch(actualTsUrl, { method: "GET", headers: fakeHeaders });
+      const tsHeaders = new Headers(tsResponse.headers);
+      tsHeaders.set("Access-Control-Allow-Origin", "*");
+      // TV端对 TS 切片的 Content-Length 极其敏感，绝不修改它
+      return new Response(tsResponse.body, { status: tsResponse.status, headers: tsHeaders });
+    } catch (e) {
+      return new Response("TS Proxy Error", { status: 500 });
+    }
+  }
+
+  // =====================================================================
+  // 路由 B：处理你请求的干净 M3U8 入口 (例如 /live/sd-1-xxx.m3u8)
+  // =====================================================================
   const TARGET_DOMAIN = "https://video10.letaocm.top";
   const targetUrl = TARGET_DOMAIN + url.pathname + url.search;
 
-  const proxyHeaders = new Headers(request.headers);
-  proxyHeaders.set("Referer", "https://688zb24.com");
-  proxyHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-  proxyHeaders.delete("Host");
-  proxyHeaders.delete("Origin");
-  
-  // 【关键修复 2】：删除 Accept-Encoding，强制源站返回明文，防止被透明解压导致的头部异常
-  proxyHeaders.delete("Accept-Encoding"); 
-
   try {
     const response = await fetch(targetUrl, {
-      method: request.method,
-      headers: proxyHeaders
+      method: "GET",
+      headers: fakeHeaders,
+      redirect: "follow" // 极其重要：必须跟随源站的 301/302 CDN 重定向
     });
 
+    const finalUrl = response.url; // 获取重定向后真正的 CDN 节点链接
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set("Access-Control-Allow-Origin", "*");
-
     const contentType = responseHeaders.get("Content-Type") || "";
 
-    // 判断是否为 M3U8 文件
+    // 如果返回的是 M3U8 文本
     if (url.pathname.endsWith(".m3u8") || contentType.includes("mpegurl")) {
-      let m3u8Text = await response.text();
+      const m3u8Text = await response.text();
 
-      // 替换其中的绝对域名
-      const escapedDomain = TARGET_DOMAIN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escapedDomain, 'g');
-      m3u8Text = m3u8Text.replace(regex, url.origin);
+      // 动态逐行重写，无视源站的相对/绝对路径或重定向
+      const rewrittenText = m3u8Text.split('\n').map(line => {
+        line = line.trim();
+        // 忽略空行和非 URI 注释行
+        if (!line || (line.startsWith('#') && !line.includes('URI='))) return line;
 
-      // 【关键修复 3】：清理并重置关键头部，迎合 IjkPlayer/ExoPlayer 的强校验
-      responseHeaders.delete("Content-Length"); 
-      responseHeaders.delete("Content-Encoding"); // 彻底掐断压缩冲突的可能
-      // 强制统一标准的 M3U8 MIME 类型
+        // 处理加密的 KEY URI
+        if (line.includes('URI="')) {
+          return line.replace(/URI="([^"]+)"/, (match, p1) => {
+            const absoluteUri = new URL(p1, finalUrl).href;
+            return `URI="${url.origin}/ts_proxy?url=${encodeURIComponent(absoluteUri)}"`;
+          });
+        }
+
+        // 将所有 TS 链接解析为真实绝对地址，并挂载到我们的 /ts_proxy 路由下
+        const absoluteTsUrl = new URL(line, finalUrl).href;
+        return `${url.origin}/ts_proxy?url=${encodeURIComponent(absoluteTsUrl)}`;
+      }).join('\n');
+
+      // 清理导致 TV 端 ExoPlayer 崩溃的响应头
+      responseHeaders.delete("Content-Length");
+      responseHeaders.delete("Content-Encoding"); // 杀掉 Gzip 冲突
       responseHeaders.set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
 
-      return new Response(m3u8Text, {
+      return new Response(rewrittenText, {
         status: response.status,
         headers: responseHeaders
       });
     }
 
-    // 对于 TS 切片，直接透传数据流
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders
-    });
+    // 非 M3U8 文件兜底透传
+    return new Response(response.body, { status: response.status, headers: responseHeaders });
 
   } catch (err) {
-    return new Response("代理内部错误: " + err.message, { status: 500 });
+    return new Response("M3U8 Proxy Error: " + err.message, { status: 500 });
   }
 }
