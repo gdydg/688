@@ -15,44 +15,74 @@ export default async function onRequest(context) {
     });
   }
 
-  // 2. 核心：构造【绝对纯净】的请求头，彻底屏蔽 OK影视/TVBox 的 okhttp 特征
-  const fakeHeaders = new Headers();
-  fakeHeaders.set("Referer", "https://688zb24.com");
-  fakeHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+  // =====================================================================
+  // 核心路由配置表 (可以随时在这里新增更多源)
+  // =====================================================================
+  const ROUTE_MAP = {
+    '/live/': { target: 'https://video10.letaocm.top', referer: 'https://688zb24.com/' },
+    '/ssports/': { target: 'https://hls.zb.ssports.com', referer: 'https://shinaisports.com/' } 
+  };
 
   // =====================================================================
-  // 路由 A：专门处理 M3U8 内部的 TS 切片代理 (防 CDN 漂移)
+  // 路由 A：专门处理 M3U8 内部的 TS 切片代理
   // =====================================================================
   if (url.pathname === "/ts_proxy") {
     const actualTsUrl = url.searchParams.get("url");
+    const routeKey = url.searchParams.get("route"); // 获取此切片所属的路由前缀
+    
     if (!actualTsUrl) return new Response("Missing TS URL", { status: 400 });
+
+    // 根据传入的 routeKey 找到对应的 referer，防错兜底
+    const config = ROUTE_MAP[routeKey] || { referer: "https://shinaisports.com/" };
+
+    const tsHeaders = new Headers();
+    tsHeaders.set("Referer", config.referer);
+    tsHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
 
     try {
       // 代理请求真实的 TS 切片
-      const tsResponse = await fetch(actualTsUrl, { method: "GET", headers: fakeHeaders });
-      const tsHeaders = new Headers(tsResponse.headers);
-      tsHeaders.set("Access-Control-Allow-Origin", "*");
-      // TV端对 TS 切片的 Content-Length 极其敏感，绝不修改它
-      return new Response(tsResponse.body, { status: tsResponse.status, headers: tsHeaders });
+      const tsResponse = await fetch(actualTsUrl, { method: "GET", headers: tsHeaders });
+      const responseHeaders = new Headers(tsResponse.headers);
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+      
+      return new Response(tsResponse.body, { status: tsResponse.status, headers: responseHeaders });
     } catch (e) {
       return new Response("TS Proxy Error", { status: 500 });
     }
   }
 
   // =====================================================================
-  // 路由 B：处理你请求的干净 M3U8 入口 (例如 /live/sd-1-xxx.m3u8)
+  // 路由 B：处理主 M3U8 入口请求
   // =====================================================================
-  const TARGET_DOMAIN = "https://video10.letaocm.top";
-  const targetUrl = TARGET_DOMAIN + url.pathname + url.search;
+  
+  // 匹配请求路径是否在我们定义的路由表里
+  let matchedRoute = Object.keys(ROUTE_MAP).find(path => url.pathname.startsWith(path));
+
+  if (!matchedRoute) {
+    return new Response("Route Not Found or Invalid Path", { status: 404 });
+  }
+
+  const config = ROUTE_MAP[matchedRoute];
+  const fakeHeaders = new Headers();
+  fakeHeaders.set("Referer", config.referer);
+  fakeHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+
+  // 拼接目标URL (这里逻辑是保留前缀：target + pathname)
+  // 比如 /ssports/123.m3u8 变成 https://hls.zb.ssports.com/ssports/123.m3u8
+  let targetPath = url.pathname;
+  if (config.strip) {
+      targetPath = targetPath.replace(matchedRoute, '/');
+  }
+  const targetUrl = config.target + targetPath + url.search;
 
   try {
     const response = await fetch(targetUrl, {
       method: "GET",
       headers: fakeHeaders,
-      redirect: "follow" // 极其重要：必须跟随源站的 301/302 CDN 重定向
+      redirect: "follow" // 必须跟随源站的重定向
     });
 
-    const finalUrl = response.url; // 获取重定向后真正的 CDN 节点链接
+    const finalUrl = response.url; // 获取重定向后真正的节点链接
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set("Access-Control-Allow-Origin", "*");
     const contentType = responseHeaders.get("Content-Type") || "";
@@ -61,28 +91,25 @@ export default async function onRequest(context) {
     if (url.pathname.endsWith(".m3u8") || contentType.includes("mpegurl")) {
       const m3u8Text = await response.text();
 
-      // 动态逐行重写，无视源站的相对/绝对路径或重定向
+      // 动态逐行重写，把 ts 请求全部劫持回我们的 /ts_proxy
       const rewrittenText = m3u8Text.split('\n').map(line => {
         line = line.trim();
-        // 忽略空行和非 URI 注释行
         if (!line || (line.startsWith('#') && !line.includes('URI='))) return line;
 
-        // 处理加密的 KEY URI
+        // 🚨 核心改动：在请求代理时，带上 &route=xxx，让 ts_proxy 知道用哪个 Referer
         if (line.includes('URI="')) {
           return line.replace(/URI="([^"]+)"/, (match, p1) => {
             const absoluteUri = new URL(p1, finalUrl).href;
-            return `URI="${url.origin}/ts_proxy?url=${encodeURIComponent(absoluteUri)}"`;
+            return `URI="${url.origin}/ts_proxy?route=${matchedRoute}&url=${encodeURIComponent(absoluteUri)}"`;
           });
         }
 
-        // 将所有 TS 链接解析为真实绝对地址，并挂载到我们的 /ts_proxy 路由下
         const absoluteTsUrl = new URL(line, finalUrl).href;
-        return `${url.origin}/ts_proxy?url=${encodeURIComponent(absoluteTsUrl)}`;
+        return `${url.origin}/ts_proxy?route=${matchedRoute}&url=${encodeURIComponent(absoluteTsUrl)}`;
       }).join('\n');
 
-      // 清理导致 TV 端 ExoPlayer 崩溃的响应头
       responseHeaders.delete("Content-Length");
-      responseHeaders.delete("Content-Encoding"); // 杀掉 Gzip 冲突
+      responseHeaders.delete("Content-Encoding"); 
       responseHeaders.set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
 
       return new Response(rewrittenText, {
