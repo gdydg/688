@@ -16,10 +16,9 @@ export default async function onRequest(context) {
   }
 
   // =====================================================================
-  // 核心路由配置表 (已新增 qinl 源并配置专属 Referer)
+  // 核心路由配置表
   // =====================================================================
   const ROUTE_MAP = {
-    // 新增 qinl 代理配置
     '/qinl/': { 
       target: 'https://qinl-play.agiaexpress.com', 
       referer: 'https://www.hbzb27.com/', 
@@ -87,7 +86,9 @@ export default async function onRequest(context) {
       redirect: "follow" // 必须跟随源站的重定向
     });
 
-    const finalUrl = response.url; // 获取重定向后真正的节点链接
+    // ✨【核心修复点】如果边缘计算环境返回的 response.url 为空，则用 targetUrl 兜底，防止报错
+    const finalUrl = response.url || targetUrl; 
+    
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set("Access-Control-Allow-Origin", "*");
     const contentType = responseHeaders.get("Content-Type") || "";
