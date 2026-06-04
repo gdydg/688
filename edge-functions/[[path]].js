@@ -16,9 +16,15 @@ export default async function onRequest(context) {
   }
 
   // =====================================================================
-  // 核心路由配置表 (可以随时在这里新增更多源)
+  // 核心路由配置表 (已新增 qinl 源并配置专属 Referer)
   // =====================================================================
   const ROUTE_MAP = {
+    // 新增 qinl 代理配置
+    '/qinl/': { 
+      target: 'https://qinl-play.agiaexpress.com', 
+      referer: 'https://www.hbzb27.com/', 
+      strip: true 
+    },
     '/live/': { target: 'https://video10.letaocm.top', referer: 'https://688zb24.com/' },
     '/ssports/': { target: 'https://hls.zb.ssports.com', referer: 'https://shinaisports.com/' } 
   };
@@ -67,8 +73,7 @@ export default async function onRequest(context) {
   fakeHeaders.set("Referer", config.referer);
   fakeHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
 
-  // 拼接目标URL (这里逻辑是保留前缀：target + pathname)
-  // 比如 /ssports/123.m3u8 变成 https://hls.zb.ssports.com/ssports/123.m3u8
+  // 拼接目标URL
   let targetPath = url.pathname;
   if (config.strip) {
       targetPath = targetPath.replace(matchedRoute, '/');
@@ -96,16 +101,16 @@ export default async function onRequest(context) {
         line = line.trim();
         if (!line || (line.startsWith('#') && !line.includes('URI='))) return line;
 
-        // 🚨 核心改动：在请求代理时，带上 &route=xxx，让 ts_proxy 知道用哪个 Referer
+        // 在请求代理时，带上 &route=xxx，让 ts_proxy 知道用哪个 Referer
         if (line.includes('URI="')) {
           return line.replace(/URI="([^"]+)"/, (match, p1) => {
             const absoluteUri = new URL(p1, finalUrl).href;
-            return `URI="${url.origin}/ts_proxy?route=${matchedRoute}&url=${encodeURIComponent(absoluteUri)}"`;
+            return `URI="${url.origin}/ts_proxy?route=${encodeURIComponent(matchedRoute)}&url=${encodeURIComponent(absoluteUri)}"`;
           });
         }
 
         const absoluteTsUrl = new URL(line, finalUrl).href;
-        return `${url.origin}/ts_proxy?route=${matchedRoute}&url=${encodeURIComponent(absoluteTsUrl)}`;
+        return `${url.origin}/ts_proxy?route=${encodeURIComponent(matchedRoute)}&url=${encodeURIComponent(absoluteTsUrl)}`;
       }).join('\n');
 
       responseHeaders.delete("Content-Length");
