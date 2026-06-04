@@ -16,11 +16,13 @@ export default async function onRequest(context) {
   }
 
   // =====================================================================
-  // 核心路由配置表 (可以随时在这里新增更多源)
+  // 核心路由配置表 (已经为你新增了 qinl-play 的配置，保持原有逻辑不变)
   // =====================================================================
   const ROUTE_MAP = {
     '/live/': { target: 'https://video10.letaocm.top', referer: 'https://688zb24.com/' },
-    '/ssports/': { target: 'https://hls.zb.ssports.com', referer: 'https://shinaisports.com/' } 
+    '/ssports/': { target: 'https://hls.zb.ssports.com', referer: 'https://shinaisports.com/' },
+    // ⬇️ 新增的代理配置：利用 strip: true 把自定义前缀 /qinl/ 还原为源站需要的 /
+    '/qinl/': { target: 'https://qinl-play.agiaexpress.com', referer: 'https://www.hbzb27.com/', strip: true }
   };
 
   // =====================================================================
