@@ -16,12 +16,13 @@ export default async function onRequest(context) {
   }
 
   // =====================================================================
-  // 核心路由配置表 (已经为你新增了 qinl-play 的配置，保持原有逻辑不变)
+  // 核心路由配置表 (可以随时在这里新增更多源)
   // =====================================================================
   const ROUTE_MAP = {
+    // 前两个源的代理前缀刚好等于真实文件夹路径，不需要 strip
     '/live/': { target: 'https://video10.letaocm.top', referer: 'https://688zb24.com/' },
     '/ssports/': { target: 'https://hls.zb.ssports.com', referer: 'https://shinaisports.com/' },
-    // ⬇️ 新增的代理配置：利用 strip: true 把自定义前缀 /qinl/ 还原为源站需要的 /
+    // 新增的源为了防止和上面重名冲突，使用了自定义前缀 /qinl/，需要 strip: true 抹去该前缀
     '/qinl/': { target: 'https://qinl-play.agiaexpress.com', referer: 'https://www.hbzb27.com/', strip: true }
   };
 
@@ -69,9 +70,10 @@ export default async function onRequest(context) {
   fakeHeaders.set("Referer", config.referer);
   fakeHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
 
-  // 拼接目标URL (这里逻辑是保留前缀：target + pathname)
-  // 比如 /ssports/123.m3u8 变成 https://hls.zb.ssports.com/ssports/123.m3u8
+  // 拼接目标URL
   let targetPath = url.pathname;
+  // 如果配置了 strip，就把请求路径里的前缀替换为 '/'
+  // 比如 /qinl/live/123.m3u8 变成 /live/123.m3u8
   if (config.strip) {
       targetPath = targetPath.replace(matchedRoute, '/');
   }
@@ -81,10 +83,12 @@ export default async function onRequest(context) {
     const response = await fetch(targetUrl, {
       method: "GET",
       headers: fakeHeaders,
-      redirect: "follow" // 必须跟随源站的重定向
+      redirect: "follow" // 跟随源站的重定向
     });
 
-    const finalUrl = response.url; // 获取重定向后真正的节点链接
+    // 🚨 核心修复点：针对 EdgeOne 环境没有发生重定向时 response.url 为空的兼容性兜底
+    const finalUrl = response.url || targetUrl; 
+
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set("Access-Control-Allow-Origin", "*");
     const contentType = responseHeaders.get("Content-Type") || "";
@@ -98,7 +102,7 @@ export default async function onRequest(context) {
         line = line.trim();
         if (!line || (line.startsWith('#') && !line.includes('URI='))) return line;
 
-        // 🚨 核心改动：在请求代理时，带上 &route=xxx，让 ts_proxy 知道用哪个 Referer
+        // 处理带加密密钥或外部音轨的 URI
         if (line.includes('URI="')) {
           return line.replace(/URI="([^"]+)"/, (match, p1) => {
             const absoluteUri = new URL(p1, finalUrl).href;
@@ -106,6 +110,7 @@ export default async function onRequest(context) {
           });
         }
 
+        // 处理普通的 TS 切片行
         const absoluteTsUrl = new URL(line, finalUrl).href;
         return `${url.origin}/ts_proxy?route=${matchedRoute}&url=${encodeURIComponent(absoluteTsUrl)}`;
       }).join('\n');
@@ -120,7 +125,7 @@ export default async function onRequest(context) {
       });
     }
 
-    // 非 M3U8 文件兜底透传
+    // 非 M3U8 文件兜底透传（比如直接请求某个 ts 或 key）
     return new Response(response.body, { status: response.status, headers: responseHeaders });
 
   } catch (err) {
